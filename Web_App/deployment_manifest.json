@@ -1,0 +1,128 @@
+{
+  "format_version": 1,
+  "run_id": "run_20261121_003103_UTC",
+  "created_utc": "2026-11-21T02:53:53.719879+00:00",
+  "dataset": "EuroSAT",
+  "seed": 42,
+  "split": {
+    "train": 18900,
+    "validation": 4050,
+    "test": 4050
+  },
+  "test_split": "stratified, image-level; RGB and 13-band MS samples paired by filename/class",
+  "classes": [
+    "AnnualCrop",
+    "Forest",
+    "HerbaceousVegetation",
+    "Highway",
+    "Industrial",
+    "Pasture",
+    "PermanentCrop",
+    "Residential",
+    "River",
+    "SeaLake"
+  ],
+  "models": {
+    "ResNet50 RGB": {
+      "filename": "best_resnet50_eurosat.pth",
+      "architecture": "resnet50",
+      "input_channels": 3,
+      "image_size": 224,
+      "sha256": "7ebff6fa6d0115d0565ac34f342f3c70c96b8d69112608a0994eb178f448ad81",
+      "size_mib": 90.054,
+      "best_epoch": 4,
+      "class_names": [
+        "AnnualCrop",
+        "Forest",
+        "HerbaceousVegetation",
+        "Highway",
+        "Industrial",
+        "Pasture",
+        "PermanentCrop",
+        "Residential",
+        "River",
+        "SeaLake"
+      ]
+    },
+    "EfficientNet-B0 RGB": {
+      "filename": "best_efficientnet_b0_eurosat_two_blocks.pth",
+      "architecture": "efficientnet_b0",
+      "input_channels": 3,
+      "image_size": 224,
+      "sha256": "8209b92d4e4fb5b10cd3b00a0ab475137093538e985f0fe43db9c3d26f1158ef",
+      "size_mib": 15.616,
+      "best_epoch": 14,
+      "class_names": [
+        "AnnualCrop",
+        "Forest",
+        "HerbaceousVegetation",
+        "Highway",
+        "Industrial",
+        "Pasture",
+        "PermanentCrop",
+        "Residential",
+        "River",
+        "SeaLake"
+      ]
+    },
+    "ResNet50 Multispectral": {
+      "filename": "best_resnet50_eurosat_multispectral.pth",
+      "architecture": "resnet50_multispectral",
+      "input_channels": 13,
+      "image_size": 224,
+      "sha256": "269471e42f0766634b21b0f5a80f264f96620d9d17a8d2c377dca4f75cc8a74e",
+      "size_mib": 90.256,
+      "best_epoch": 20,
+      "class_names": [
+        "AnnualCrop",
+        "Forest",
+        "HerbaceousVegetation",
+        "Highway",
+        "Industrial",
+        "Pasture",
+        "PermanentCrop",
+        "Residential",
+        "River",
+        "SeaLake"
+      ]
+    }
+  },
+  "metrics": [
+    {
+      "Model": "ResNet50 RGB",
+      "Test images": 4050,
+      "Test accuracy": 0.9790123456790123,
+      "Macro precision": 0.9785046509812296,
+      "Macro recall": 0.9788666666666666,
+      "Macro F1": 0.9786353588264053,
+      "Errors": 85,
+      "Training seconds": 746.4859131810001
+    },
+    {
+      "Model": "EfficientNet-B0 RGB",
+      "Test images": 4050,
+      "Test accuracy": 0.9703703703703703,
+      "Macro precision": 0.9689584820555799,
+      "Macro recall": 0.9698444444444444,
+      "Macro F1": 0.9693437019093928,
+      "Errors": 120,
+      "Training seconds": 956.004179679
+    },
+    {
+      "Model": "ResNet50 Multispectral",
+      "Test images": 4050,
+      "Test accuracy": 0.9869135802469136,
+      "Macro precision": 0.9863244164595886,
+      "Macro recall": 0.9863555555555555,
+      "Macro F1": 0.9863223900604863,
+      "Errors": 53,
+      "Training seconds": 5017.321060550999
+    }
+  ],
+  "future_app": "RGB JPG/PNG supported by ResNet50 RGB and EfficientNet-B0; 13-band TIFF by ResNet50 MS",
+  "limitations": [
+    "Not a geographic holdout",
+    "Softmax model scores are not calibrated",
+    "External 13-band TIFF ordering and units must match the checkpoint"
+  ]
+}

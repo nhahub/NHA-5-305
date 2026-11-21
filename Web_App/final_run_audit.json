@@ -1,0 +1,13 @@
+{
+  "run_id": "run_20261121_003103_UTC",
+  "evaluation": "PASSED",
+  "test_samples_per_model": 4050,
+  "paired_rgb_ms_test": true,
+  "smoke_test_count": 6,
+  "checkpoint_hashes_verified": true,
+  "manual_fresh_run_review_required": true,
+  "runtime": {
+    "torch": "2.14.1+cu130",
+    "torchvision": "0.29.1+cu130"
+  }
+}

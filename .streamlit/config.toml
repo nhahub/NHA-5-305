@@ -1,0 +1,14 @@
+[theme]
+primaryColor = "#189b78"
+backgroundColor = "#0b141b"
+secondaryBackgroundColor = "#162630"
+textColor = "#f2f8fa"
+font = "sans serif"
+
+[server]
+headless = true
+maxUploadSize = 30
+maxMessageSize = 40
+
+[client]
+toolbarMode = "minimal"
