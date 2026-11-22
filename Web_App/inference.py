@@ -227,26 +227,41 @@ def preprocess_ms(tiff_path: str | Path, checkpoint: dict[str, Any], *,
     )
 
 
+def predict_tensors(model: nn.Module, checkpoint: dict[str, Any], tensors: torch.Tensor) -> list[dict[str, Any]]:
+    """Run a real tensor batch using the same checkpoint and score contract as single-image inference."""
+    channels = int(checkpoint["input_channels"])
+    size = int(checkpoint["image_size"])
+    if tensors.ndim != 4 or tensors.shape[0] < 1 or tuple(tensors.shape[1:]) != (channels, size, size):
+        raise ValueError(f"Expected tensor batch shape (N, {channels}, {size}, {size}), N >= 1")
+    with torch.inference_mode():
+        probabilities = torch.softmax(model(tensors), dim=1).cpu()
+    names = checkpoint["class_names"]
+    if tuple(probabilities.shape) != (tensors.shape[0], len(names)):
+        raise ValueError("Model returned unexpected output shape")
+    results = []
+    for probabilities_one in probabilities:
+        if not torch.isfinite(probabilities_one).all():
+            raise ValueError("Model returned a non-finite prediction")
+        scores, indexes = torch.topk(probabilities_one, k=3)
+        top3 = [
+            {"class_name": names[int(i)], "score": float(score)}
+            for score, i in zip(scores.tolist(), indexes.tolist())
+        ]
+        results.append({
+            "prediction": top3[0]["class_name"],
+            "model_score": top3[0]["score"],
+            "top3": top3,
+        })
+    return results
+
+
 def predict_tensor(model: nn.Module, checkpoint: dict[str, Any], tensor: torch.Tensor) -> dict[str, Any]:
+    """Keep the single-image API and its strict (1, C, H, W) input contract."""
     channels = int(checkpoint["input_channels"])
     size = int(checkpoint["image_size"])
     if tensor.ndim != 4 or tuple(tensor.shape) != (1, channels, size, size):
         raise ValueError(f"Expected tensor shape (1, {channels}, {size}, {size})")
-    with torch.inference_mode():
-        probabilities = torch.softmax(model(tensor), dim=1)[0].cpu()
-    if not torch.isfinite(probabilities).all():
-        raise ValueError("Model returned a non-finite prediction")
-    scores, indexes = torch.topk(probabilities, k=3)
-    names = checkpoint["class_names"]
-    top3 = [
-        {"class_name": names[int(i)], "score": float(score)}
-        for score, i in zip(scores.tolist(), indexes.tolist())
-    ]
-    return {
-        "prediction": top3[0]["class_name"],
-        "model_score": top3[0]["score"],
-        "top3": top3,
-    }
+    return predict_tensors(model, checkpoint, tensor)[0]
 
 
 def predict_rgb(image: Image.Image, model_label: str) -> dict[str, Any]:

@@ -27,6 +27,7 @@ class FakeStreamlit(types.ModuleType):
     def __init__(self):
         super().__init__("streamlit")
         self.events = []
+        self.session_state = {}  # Streamlit Session State mock for Batch UI
         self.cache_data = lambda **kwargs: (lambda f: f)
 
     def __getattr__(self, name):
@@ -38,7 +39,7 @@ class FakeStreamlit(types.ModuleType):
                 return self
             if name in ("tabs", "columns"):
                 return [self for _ in (args[0] if isinstance(args[0], (tuple, list)) else range(args[0]))]
-            if name == "selectbox":
+            if name in ("selectbox", "radio"):
                 return args[1][0]
             if name == "form_submit_button":
                 return False
@@ -142,9 +143,9 @@ class CheckpointAndFrontendTests(unittest.TestCase):
             app.main()
             tabs = [event for event in fake.events if event[0] == "tabs"]
             self.assertEqual(len(tabs), 1)
-            self.assertEqual(len(tabs[0][1][0]), 3)
-            self.assertEqual(sum(1 for name, _ in fake.events if name == "file_uploader"), 2)
-            self.assertEqual(sum(1 for name, _ in fake.events if name == "form_submit_button"), 2)
+            self.assertEqual(len(tabs[0][1][0]), 4)
+            self.assertEqual(sum(1 for name, _ in fake.events if name == "file_uploader"), 3)
+            self.assertEqual(sum(1 for name, _ in fake.events if name == "form_submit_button"), 3)
             buf = io.BytesIO()
             self.rgb.save(buf, format="PNG")
             loaded = app.load_rgb_upload(Upload("satellite.png", buf.getvalue()))
@@ -159,7 +160,13 @@ class CheckpointAndFrontendTests(unittest.TestCase):
 
     def test_git_ready_metadata(self):
         repo = ROOT.parent
-        self.assertIn("filter=lfs", (repo / ".gitattributes").read_text())
+        # Check real checkpoint binaries rather than the retired Git LFS metadata.
+        attrs = repo / ".gitattributes"
+        if attrs.exists():
+            self.assertNotIn("filter=lfs", attrs.read_text(encoding="utf-8"))
+        for name in inf.EXPECTED_MODELS:
+            with self.subTest(checkpoint=name):
+                self.assertGreater(inf.checkpoint_path(name).stat().st_size, 1_000_000)
         self.assertIn("headless", (repo / ".streamlit" / "config.toml").read_text())
         self.assertTrue((repo / "Land_Type_Classification_Final.ipynb").exists())
         req = (ROOT / "requirements.txt").read_text()
