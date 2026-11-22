@@ -15,8 +15,13 @@ from PIL import Image, UnidentifiedImageError
 import pandas as pd
 import streamlit as st
 
-from batch_inference import MAX_IMAGES, classify_rgb_batch
+from batch_inference import MAX_IMAGES, classify_rgb_batch, classify_rgb_batch_comparison
 from batch_analytics import results_to_csv, summary_to_csv, summarize_results
+from smart_review import (
+    comparison_results_to_csv,
+    review_queue_to_csv,
+    summarize_comparison_results,
+)
 
 from inference import (
     BAND_ORDER,
@@ -159,7 +164,7 @@ def main() -> None:
     st.markdown('<div class="pill">DEEP LEARNING · SATELLITE IMAGERY</div>', unsafe_allow_html=True)
     st.markdown('<div class="hero-title">Land Type Classification</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="hero-sub">Upload a satellite image, choose a trained model, and predict the land-cover category. ' 
+        '<div class="hero-sub">Upload a satellite image, choose a trained model, and predict the land-cover category. '
         'ارفع صورة قمر صناعي لمعرفة نوع الأرض.</div>', unsafe_allow_html=True
     )
 
@@ -203,6 +208,12 @@ def main() -> None:
             "Process multiple EuroSAT-style satellite patches using the same checkpoints "
             "and preprocessing as the single-image interface. Scores are uncalibrated."
         )
+        workflow_mode = st.radio(
+            "Batch workflow",
+            ["Single-model batch", "Multi-model comparison"],
+            horizontal=True,
+            key="batch_workflow_mode",
+        )
         source_type = st.radio("Input source", ["Multiple images", "ZIP archive"], horizontal=True)
         with st.form("batch_rgb_classification", clear_on_submit=False):
             if source_type == "Multiple images":
@@ -216,16 +227,57 @@ def main() -> None:
                     "Upload a ZIP containing JPG/PNG images", type=["zip"], key="batch_zip_upload",
                 )
                 batch_uploads = []
-            selected_model = st.selectbox(
-                "RGB model for batch", [MODEL_RGB_RESNET, MODEL_RGB_EFFICIENT], key="batch_model",
-            )
+
+            selected_model = None
+            low_score_threshold = None
+            margin_threshold = None
+            if workflow_mode == "Single-model batch":
+                selected_model = st.selectbox(
+                    "RGB model for batch", [MODEL_RGB_RESNET, MODEL_RGB_EFFICIENT], key="batch_model",
+                )
+            else:
+                st.info(
+                    "Both RGB models will process the same images. Models run sequentially to "
+                    "reduce peak memory use; no retraining is performed."
+                )
+                enable_low_score_review = st.checkbox(
+                    "Flag low Top-1 scores for human review (optional)", value=False,
+                    key="smart_review_low_score_enabled",
+                )
+                if enable_low_score_review:
+                    selected_low_score = st.slider(
+                        "Low Top-1 score threshold", min_value=0.0, max_value=1.0,
+                        value=0.60, step=0.05, key="smart_review_low_score_threshold",
+                    )
+                    low_score_threshold = (
+                        float(selected_low_score) if isinstance(selected_low_score, (int, float)) else 0.60
+                    )
+                enable_margin_review = st.checkbox(
+                    "Flag small Top-1 / Top-2 margins for human review (optional)",
+                    value=False, key="smart_review_margin_enabled",
+                )
+                if enable_margin_review:
+                    selected_margin = st.slider(
+                        "Small margin threshold", min_value=0.0, max_value=1.0,
+                        value=0.10, step=0.05, key="smart_review_margin_threshold",
+                    )
+                    margin_threshold = (
+                        float(selected_margin) if isinstance(selected_margin, (int, float)) else 0.10
+                    )
+                st.caption(
+                    "Model disagreement always enters the review queue. Optional score and margin "
+                    "rules use each model's own uncalibrated scores; scores are not compared across models."
+                )
+
             batch_size = st.select_slider("Inference batch size", options=[1, 2, 4, 8, 16], value=8)
             st.caption(
                 f"Limit: {MAX_IMAGES} files per job, 10 MiB per image, 100 MiB total. "
                 "ZIP: 50 MiB compressed. Images must be JPG/PNG satellite patches."
             )
             batch_submitted = st.form_submit_button(
-                "🚀 Classify Batch", type="primary", use_container_width=True,
+                "🚀 Run Batch Classification" if workflow_mode == "Single-model batch"
+                else "🚀 Compare Both RGB Models",
+                type="primary", use_container_width=True,
             )
 
         if batch_submitted:
@@ -233,19 +285,40 @@ def main() -> None:
             progress_text = st.empty()
 
             def update_progress(done: int, total: int) -> None:
-                progress_bar.progress(min(1.0, done / total))
-                progress_text.caption(f"Processed {done:,} / {total:,} files")
+                fraction = min(1.0, done / total) if total else 0.0
+                progress_bar.progress(fraction)
+                progress_text.caption(
+                    f"Completed {done:,} / {total:,} model-image operations"
+                    if workflow_mode == "Multi-model comparison"
+                    else f"Processed {done:,} / {total:,} files"
+                )
 
             try:
-                with st.spinner("Classifying uploaded satellite images on CPU..."):
-                    batch_rows = classify_rgb_batch(
-                        batch_uploads, selected_model, batch_size=batch_size,
-                        zip_upload=zip_upload, on_progress=update_progress,
-                    )
-                st.session_state["last_rgb_batch_report"] = {
-                    "rows": batch_rows,
-                    "model": selected_model,
-                }
+                with st.spinner("Running trained RGB model inference on CPU..."):
+                    if workflow_mode == "Single-model batch":
+                        batch_rows = classify_rgb_batch(
+                            batch_uploads, selected_model, batch_size=batch_size,
+                            zip_upload=zip_upload, on_progress=update_progress,
+                        )
+                        st.session_state["last_rgb_batch_report"] = {
+                            "mode": "single",
+                            "rows": batch_rows,
+                            "model": selected_model,
+                        }
+                    else:
+                        comparison_rows = classify_rgb_batch_comparison(
+                            batch_uploads, batch_size=batch_size,
+                            zip_upload=zip_upload,
+                            low_score_threshold=low_score_threshold,
+                            margin_threshold=margin_threshold,
+                            on_progress=update_progress,
+                        )
+                        st.session_state["last_rgb_batch_report"] = {
+                            "mode": "comparison",
+                            "rows": comparison_rows,
+                            "low_score_threshold": low_score_threshold,
+                            "margin_threshold": margin_threshold,
+                        }
                 st.success("Batch classification finished.")
             except (ValueError, OSError, RuntimeError, FileNotFoundError) as exc:
                 st.session_state.pop("last_rgb_batch_report", None)
@@ -255,7 +328,86 @@ def main() -> None:
                 progress_text.empty()
 
         saved_report = st.session_state.get("last_rgb_batch_report")
-        if saved_report:
+        if saved_report and saved_report.get("mode") == "comparison":
+            rows = saved_report["rows"]
+            summary = summarize_comparison_results(rows)
+            st.markdown("#### Multi-model comparison results")
+            metric_cols = st.columns(5)
+            metric_cols[0].metric("Uploaded", summary["total"])
+            metric_cols[1].metric("Fully compared", summary["fully_compared"])
+            metric_cols[2].metric(
+                "Agreement rate",
+                f"{summary['agreement_rate']:.1f}%" if summary["agreement_rate"] is not None else "—",
+            )
+            metric_cols[3].metric("Disagreements", summary["disagreement"])
+            metric_cols[4].metric("Needs review", summary["review_required"])
+
+            left_analytics, right_analytics = st.columns([3, 2], gap="large")
+            with left_analytics:
+                st.markdown("#### Comparison outcome distribution")
+                distribution = pd.DataFrame(summary["status_distribution"])
+                st.bar_chart(distribution.set_index("status")["count"])
+            with right_analytics:
+                st.markdown("#### Comparison summary")
+                st.dataframe(
+                    pd.DataFrame(summary["status_distribution"]),
+                    use_container_width=True, hide_index=True,
+                )
+
+            st.markdown("#### Smart review queue")
+            st.caption(
+                "Disagreement and model failures are always flagged. Optional low-score and margin "
+                "rules are heuristics, not calibrated confidence estimates."
+            )
+            status_choice = st.selectbox(
+                "Filter by comparison status",
+                ["All", "agreement", "disagreement", "partial_failure", "failed"],
+                key="comparison_status_filter",
+            )
+            review_only = st.checkbox(
+                "Show only images requiring human review", value=False,
+                key="comparison_review_only",
+            )
+            class_filter = st.multiselect(
+                "Filter by predicted class (either model)",
+                options=list(manifest["classes"]), key="comparison_class_filter",
+            )
+            filtered = [
+                row for row in rows
+                if (status_choice == "All" or row["comparison_status"] == status_choice)
+                and (not review_only or row["review_required"])
+                and (
+                    not class_filter
+                    or row["resnet50_prediction"] in class_filter
+                    or row["efficientnet_prediction"] in class_filter
+                )
+            ]
+            st.dataframe(pd.DataFrame(filtered), use_container_width=True, hide_index=True)
+            download_all, download_review = st.columns(2)
+            with download_all:
+                st.download_button(
+                    "⬇️ Download all comparison results",
+                    data=comparison_results_to_csv(rows),
+                    file_name="model_comparison_results.csv", mime="text/csv",
+                    use_container_width=True, key="download_model_comparison",
+                )
+            with download_review:
+                st.download_button(
+                    "⬇️ Download human review queue",
+                    data=review_queue_to_csv(rows),
+                    file_name="smart_review_queue.csv", mime="text/csv",
+                    use_container_width=True, key="download_smart_review_queue",
+                )
+            thresholds = []
+            if saved_report.get("low_score_threshold") is not None:
+                thresholds.append(f"low Top-1 < {saved_report['low_score_threshold']:.2f}")
+            if saved_report.get("margin_threshold") is not None:
+                thresholds.append(f"Top-1/Top-2 margin < {saved_report['margin_threshold']:.2f}")
+            st.caption(
+                "Optional review rules: " + (", ".join(thresholds) if thresholds else "disabled") +
+                ". Agreement does not prove correctness; inspect flagged images before operational decisions."
+            )
+        elif saved_report:
             rows = saved_report["rows"]
             summary = summarize_results(rows, list(manifest["classes"]))
             st.markdown(f"#### Results — {saved_report['model']}")
@@ -312,7 +464,7 @@ def main() -> None:
                 "for non-EuroSAT images; review them before operational use."
             )
         else:
-            st.info("Choose a model, upload multiple images or a ZIP, and click **Classify Batch**.")
+            st.info("Choose a workflow, upload multiple images or a ZIP, and run batch classification.")
 
     with tab_ms:
         st.subheader("Classify a 13-band Sentinel-2 GeoTIFF")

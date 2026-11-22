@@ -28,6 +28,8 @@ class FakeStreamlit(types.ModuleType):
         super().__init__("streamlit")
         self.events = []
         self.session_state = {}  # Streamlit Session State mock for Batch UI
+        self.radio_values = {}
+        self.submit_labels = set()
         self.cache_data = lambda **kwargs: (lambda f: f)
 
     def __getattr__(self, name):
@@ -35,18 +37,26 @@ class FakeStreamlit(types.ModuleType):
             return self
         def method(*args, **kwargs):
             self.events.append((name, args))
-            if name in ("form", "expander"):
+            if name in ("form", "expander", "spinner"):
                 return self
             if name in ("tabs", "columns"):
                 return [self for _ in (args[0] if isinstance(args[0], (tuple, list)) else range(args[0]))]
-            if name in ("selectbox", "radio"):
+            if name == "radio":
+                return self.radio_values.get(kwargs.get("key"), args[1][0])
+            if name == "selectbox":
                 return args[1][0]
+            if name == "select_slider":
+                return kwargs.get("value")
+            if name == "slider":
+                return kwargs.get("value")
             if name == "form_submit_button":
-                return False
+                return args[0] in self.submit_labels
             if name == "file_uploader":
                 return None
             if name == "checkbox":
-                return False
+                return kwargs.get("value", False)
+            if name in ("progress", "empty"):
+                return self
             return None
         return method
 
@@ -156,6 +166,58 @@ class CheckpointAndFrontendTests(unittest.TestCase):
                 app.classify_ms_upload(Upload("test.tif", b"hi"), False)
             with self.assertRaisesRegex(ValueError, "maximum 25 MB"):
                 app.classify_ms_upload(Upload("test.tif", b"0" * (25*1024*1024+1)), True)
+            sys.modules.pop("app", None)
+
+    def test_streamlit_multi_model_comparison_ui_wiring(self):
+        fake = FakeStreamlit()
+        fake.radio_values["batch_workflow_mode"] = "Multi-model comparison"
+        fake.submit_labels.add("🚀 Compare Both RGB Models")
+        with patch.dict(sys.modules, {"streamlit": fake}):
+            sys.modules.pop("app", None)
+            app = importlib.import_module("app")
+
+            def fake_comparison(files, batch_size=8, **kwargs):
+                if kwargs.get("on_progress"):
+                    kwargs["on_progress"](4, 4)
+                return [{
+                    "filename": "sample.png",
+                    "resnet50_status": "success",
+                    "resnet50_prediction": "Forest",
+                    "resnet50_top1_score": 0.9,
+                    "resnet50_top2_class": "Pasture",
+                    "resnet50_top2_score": 0.05,
+                    "resnet50_top3_class": "River",
+                    "resnet50_top3_score": 0.02,
+                    "resnet50_margin": 0.85,
+                    "resnet50_error": "",
+                    "efficientnet_status": "success",
+                    "efficientnet_prediction": "River",
+                    "efficientnet_top1_score": 0.8,
+                    "efficientnet_top2_class": "Forest",
+                    "efficientnet_top2_score": 0.1,
+                    "efficientnet_top3_class": "Pasture",
+                    "efficientnet_top3_score": 0.05,
+                    "efficientnet_margin": 0.7,
+                    "efficientnet_error": "",
+                    "comparison_status": "disagreement",
+                    "agreement": False,
+                    "review_required": True,
+                    "review_priority": "high",
+                    "review_reasons": "model_disagreement",
+                }]
+
+            with patch.object(app, "classify_rgb_batch_comparison", side_effect=fake_comparison) as runner:
+                app.main()
+
+            self.assertEqual(runner.call_count, 1)
+            self.assertTrue(any(
+                name == "download_button" and args[0] == "⬇️ Download all comparison results"
+                for name, args in fake.events
+            ))
+            self.assertTrue(any(
+                name == "download_button" and args[0] == "⬇️ Download human review queue"
+                for name, args in fake.events
+            ))
             sys.modules.pop("app", None)
 
     def test_git_ready_metadata(self):

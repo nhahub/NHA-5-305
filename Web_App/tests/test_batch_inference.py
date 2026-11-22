@@ -157,5 +157,89 @@ class TestBatchInference(unittest.TestCase):
             )
 
 
+    def test_comparison_runs_both_models_once_and_preserves_filename_alignment(self):
+        class FixedClassNet(torch.nn.Module):
+            def __init__(self, class_index):
+                super().__init__()
+                self.class_index = class_index
+
+            def forward(self, tensor):
+                logits = torch.zeros((tensor.shape[0], 10), dtype=tensor.dtype)
+                logits[:, self.class_index] = 5.0
+                return logits
+
+        files = [
+            FakeUpload("first.png", image_bytes((10, 20, 30))),
+            FakeUpload("second.png", image_bytes((40, 50, 60))),
+            FakeUpload("third.png", image_bytes((70, 80, 90))),
+        ]
+        progress = []
+        with patch(
+            "batch_inference.load_model",
+            side_effect=[(FixedClassNet(1).eval(), META), (FixedClassNet(2).eval(), META)],
+        ) as mocked:
+            rows = batch.classify_rgb_batch_comparison(
+                files, batch_size=2,
+                on_progress=lambda done, total: progress.append((done, total)),
+            )
+
+        self.assertEqual(mocked.call_count, 2)
+        mocked.cache_clear.assert_called_once()
+        self.assertEqual(
+            [call.args[0] for call in mocked.call_args_list],
+            [inference.MODEL_RGB_RESNET, inference.MODEL_RGB_EFFICIENT],
+        )
+        self.assertEqual([row["filename"] for row in rows], [file.name for file in files])
+        self.assertEqual([row["comparison_status"] for row in rows], ["disagreement"] * 3)
+        self.assertTrue(all(row["review_required"] for row in rows))
+        self.assertEqual(progress[-1], (6, 6))
+
+    def test_comparison_keeps_partial_model_failure(self):
+        files = [
+            FakeUpload("one.png", image_bytes((10, 20, 30))),
+            FakeUpload("two.png", image_bytes((40, 50, 60))),
+        ]
+        with patch(
+            "batch_inference.load_model",
+            side_effect=[(FakeNet().eval(), META), OSError("EfficientNet checkpoint unavailable")],
+        ) as mocked:
+            rows = batch.classify_rgb_batch_comparison(files, batch_size=1)
+
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual([row["comparison_status"] for row in rows], ["partial_failure"] * 2)
+        self.assertTrue(all(row["resnet50_status"] == "success" for row in rows))
+        self.assertTrue(all(row["efficientnet_status"] == "error" for row in rows))
+        self.assertTrue(all(row["review_required"] for row in rows))
+        self.assertTrue(all(row["review_priority"] == "high" for row in rows))
+
+    def test_comparison_corrupt_image_isolated_and_progress_completes(self):
+        files = [
+            FakeUpload("good.png", image_bytes((10, 20, 30))),
+            FakeUpload("broken.png", b"not an image"),
+            FakeUpload("also_good.png", image_bytes((40, 50, 60))),
+        ]
+        progress = []
+        with patch(
+            "batch_inference.load_model",
+            side_effect=[(FakeNet().eval(), META), (FakeNet().eval(), META)],
+        ):
+            rows = batch.classify_rgb_batch_comparison(
+                files, batch_size=2,
+                on_progress=lambda done, total: progress.append((done, total)),
+            )
+        self.assertEqual([row["filename"] for row in rows], [f.name for f in files])
+        self.assertEqual(rows[0]["comparison_status"], "agreement")
+        self.assertEqual(rows[1]["comparison_status"], "failed")
+        self.assertEqual(rows[2]["comparison_status"], "agreement")
+        self.assertTrue(rows[1]["review_required"])
+        self.assertEqual(progress[-1], (6, 6))
+
+    def test_comparison_rejects_invalid_threshold(self):
+        files = [FakeUpload("one.png", image_bytes((10, 20, 30)))]
+        with self.assertRaisesRegex(ValueError, "Low-score threshold"):
+            batch.classify_rgb_batch_comparison(files, low_score_threshold=2.0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

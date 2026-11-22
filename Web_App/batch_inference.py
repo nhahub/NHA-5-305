@@ -140,6 +140,86 @@ def _read_rgb(name: str, data: bytes | None) -> Image.Image:
         raise ValueError("Unreadable or unsafe image") from exc
 
 
+def _classify_items(
+    items: list[tuple[str, bytes | None, str | None]],
+    model_name: str,
+    batch_size: int,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> list[dict]:
+    """Classify already validated upload records with one model load per job."""
+    rows: list[dict | None] = [_empty_row(name, model_name) for name, _, _ in items]
+    valid_indexes = [
+        i for i, (name, data, error) in enumerate(items)
+        if not error and data and Path(name).suffix.lower() in VALID_EXTENSIONS
+    ]
+    model = checkpoint = None
+    model_load_error = None
+
+    # Load once, not once per image. Skip model loading if every input is invalid.
+    if valid_indexes:
+        try:
+            model, checkpoint = load_model(model_name)
+        except (ValueError, RuntimeError, OSError, FileNotFoundError) as exc:
+            model_load_error = f"Model loading failed: {str(exc)[:180]}"
+
+    processed = 0
+    pending: list[tuple[int, torch.Tensor]] = []
+
+    def report(count: int = 1) -> None:
+        nonlocal processed
+        processed += count
+        if on_progress is not None:
+            on_progress(processed, len(items))
+
+    def flush() -> None:
+        nonlocal pending
+        if not pending:
+            return
+        batch = torch.cat([tensor for _, tensor in pending], dim=0)
+        try:
+            predictions = predict_tensors(model, checkpoint, batch)
+            if len(predictions) != len(pending):
+                raise ValueError("Prediction count does not match the input batch")
+            for (idx, _), prediction in zip(pending, predictions):
+                rows[idx].update({
+                    "status": "success",
+                    "predicted_class": prediction["prediction"],
+                    "top1_score": prediction["top3"][0]["score"],
+                    "top2_class": prediction["top3"][1]["class_name"],
+                    "top2_score": prediction["top3"][1]["score"],
+                    "top3_class": prediction["top3"][2]["class_name"],
+                    "top3_score": prediction["top3"][2]["score"],
+                })
+        except (ValueError, RuntimeError, OSError, TypeError) as exc:
+            # Keep one explicit failure row for every image in the failed model batch.
+            for idx, _ in pending:
+                rows[idx]["error"] = f"Model inference failed: {str(exc)[:180]}"
+        report(len(pending))
+        pending = []
+
+    for idx, (filename, data, validation_error) in enumerate(items):
+        if validation_error:
+            rows[idx]["error"] = validation_error
+            report()
+            continue
+        if model_load_error:
+            rows[idx]["error"] = model_load_error
+            report()
+            continue
+        try:
+            image = _read_rgb(filename, data)
+            tensor = preprocess_rgb(image, checkpoint)
+            pending.append((idx, tensor))
+            if len(pending) >= batch_size:
+                flush()
+        except (ValueError, TypeError, RuntimeError, OSError, FileNotFoundError) as exc:
+            rows[idx]["error"] = str(exc)[:240]
+            report()
+    flush()
+    return [row for row in rows]
+
+
 def classify_rgb_batch(
     files: Sequence,
     model_name: str,
@@ -150,69 +230,66 @@ def classify_rgb_batch(
 ) -> list[dict]:
     """Return one ordered result per uploaded image, including failures.
 
-    Model loads once per job, tensors are materialized only per batch. Uses
-    inference.preprocess_rgb and inference.predict_tensors: no retraining.
+    The model is loaded once per job. Existing single-model behavior and result
+    schema are preserved for backward compatibility.
     """
     if model_name not in (MODEL_RGB_RESNET, MODEL_RGB_EFFICIENT):
         raise ValueError("Batch processing currently supports RGB models only.")
-    if not isinstance(batch_size, int) or not 1 <= batch_size <= 16:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 16:
         raise ValueError("Batch size must be between 1 and 16.")
     items = _uploaded_items(files, zip_upload)
-    rows: list[dict | None] = [None] * len(items)
-    pending: list[tuple[int, torch.Tensor]] = []
-    model = checkpoint = None
-    processed = 0
+    return _classify_items(items, model_name, batch_size, on_progress=on_progress)
 
-    def report():
-        if on_progress is not None:
-            on_progress(processed, len(items))
 
-    def flush():
-        nonlocal pending, processed
-        if not pending:
-            return
-        batch = torch.cat([tensor for _, tensor in pending], dim=0)
-        try:
-            predictions = predict_tensors(model, checkpoint, batch)
-            if len(predictions) != len(pending):
-                raise ValueError("Prediction count does not match the input batch")
-            for (idx, _), prediction in zip(pending, predictions):
-                row = rows[idx]
-                row.update({
-                    "status": "success",
-                    "predicted_class": prediction["prediction"],
-                    "top1_score": prediction["top3"][0]["score"],
-                    "top2_class": prediction["top3"][1]["class_name"],
-                    "top2_score": prediction["top3"][1]["score"],
-                    "top3_class": prediction["top3"][2]["class_name"],
-                    "top3_score": prediction["top3"][2]["score"],
-                })
-        except (ValueError, RuntimeError, OSError) as exc:
-            # Preserve a report row for every input rather than crashing the whole job.
-            for idx, _ in pending:
-                rows[idx]["error"] = f"Model inference failed: {str(exc)[:180]}"
-        processed += len(pending)
-        pending = []
-        report()
+def classify_rgb_batch_comparison(
+    files: Sequence,
+    batch_size: int = 8,
+    *,
+    zip_upload=None,
+    low_score_threshold: float | None = None,
+    margin_threshold: float | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> list[dict]:
+    """Run both trained RGB models on the same ordered inputs and compare outputs.
 
-    for idx, (filename, data, validation_error) in enumerate(items):
-        rows[idx] = _empty_row(filename, model_name)
-        if validation_error:
-            rows[idx]["error"] = validation_error
-            processed += 1
-            report()
-            continue
-        try:
-            image = _read_rgb(filename, data)
-            if model is None:
-                model, checkpoint = load_model(model_name)
-            tensor = preprocess_rgb(image, checkpoint)
-            pending.append((idx, tensor))
-            if len(pending) == batch_size:
-                flush()
-        except (ValueError, TypeError, RuntimeError, OSError, FileNotFoundError) as exc:
-            rows[idx]["error"] = str(exc)[:240]
-            processed += 1
-            report()
-    flush()
-    return rows
+    Each model is loaded once per job (sequentially to limit peak memory). The
+    source files are parsed once into bounded byte records, and each model uses
+    its own checkpoint-backed preprocessing. A failure in one model does not
+    suppress successful predictions from the other model.
+    """
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 16:
+        raise ValueError("Batch size must be between 1 and 16.")
+    from smart_review import compare_model_results, validate_review_thresholds
+
+    low_score_threshold, margin_threshold = validate_review_thresholds(
+        low_score_threshold, margin_threshold
+    )
+    items = _uploaded_items(files, zip_upload)
+    total_work = 2 * len(items)
+
+    def stage_progress(offset: int):
+        def callback(done: int, _total: int) -> None:
+            if on_progress is not None:
+                on_progress(offset + done, total_work)
+        return callback
+
+    # Sequential execution keeps only one checkpoint/model resident at a time.
+    resnet_rows = _classify_items(
+        items, MODEL_RGB_RESNET, batch_size,
+        on_progress=stage_progress(0),
+    )
+    # lru_cache(maxsize=1) normally retains the previous model until a new
+    # cache miss has loaded its replacement. Clear explicitly between passes
+    # so the two checkpoints are not resident together during model loading.
+    load_model.cache_clear()
+    efficient_rows = _classify_items(
+        items, MODEL_RGB_EFFICIENT, batch_size,
+        on_progress=stage_progress(len(items)),
+    )
+
+    return compare_model_results(
+        resnet_rows,
+        efficient_rows,
+        low_score_threshold=low_score_threshold,
+        margin_threshold=margin_threshold,
+    )
