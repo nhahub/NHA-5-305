@@ -12,7 +12,11 @@ import tempfile
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
+import pandas as pd
 import streamlit as st
+
+from batch_inference import MAX_IMAGES, classify_rgb_batch
+from batch_analytics import results_to_csv, summary_to_csv, summarize_results
 
 from inference import (
     BAND_ORDER,
@@ -159,7 +163,12 @@ def main() -> None:
         'ارفع صورة قمر صناعي لمعرفة نوع الأرض.</div>', unsafe_allow_html=True
     )
 
-    tab_rgb, tab_ms, tab_guide = st.tabs(["📷 RGB Image (JPG / PNG)", "🛰️ Multispectral (13-band TIFF)", "ℹ️ About / Input Guide"])
+    tab_rgb, tab_batch, tab_ms, tab_guide = st.tabs([
+        "📷 RGB Image (JPG / PNG)",
+        "📚 Batch Classification & Analytics",
+        "🛰️ Multispectral (13-band TIFF)",
+        "ℹ️ About / Input Guide",
+    ])
     with tab_rgb:
         st.subheader("Classify an RGB satellite image")
         st.caption("Use small satellite patches similar to EuroSAT. Ordinary photographs are out of scope.")
@@ -187,6 +196,123 @@ def main() -> None:
                     st.error(f"Could not classify image: {exc}")
             else:
                 st.info("Upload an RGB satellite image and press **Classify Image** to see the prediction.")
+
+    with tab_batch:
+        st.subheader("Batch RGB classification & analytics")
+        st.caption(
+            "Process multiple EuroSAT-style satellite patches using the same checkpoints "
+            "and preprocessing as the single-image interface. Scores are uncalibrated."
+        )
+        source_type = st.radio("Input source", ["Multiple images", "ZIP archive"], horizontal=True)
+        with st.form("batch_rgb_classification", clear_on_submit=False):
+            if source_type == "Multiple images":
+                batch_uploads = st.file_uploader(
+                    "Upload JPG/PNG images", type=["jpg", "jpeg", "png"],
+                    accept_multiple_files=True, key="batch_rgb_uploads",
+                )
+                zip_upload = None
+            else:
+                zip_upload = st.file_uploader(
+                    "Upload a ZIP containing JPG/PNG images", type=["zip"], key="batch_zip_upload",
+                )
+                batch_uploads = []
+            selected_model = st.selectbox(
+                "RGB model for batch", [MODEL_RGB_RESNET, MODEL_RGB_EFFICIENT], key="batch_model",
+            )
+            batch_size = st.select_slider("Inference batch size", options=[1, 2, 4, 8, 16], value=8)
+            st.caption(
+                f"Limit: {MAX_IMAGES} files per job, 10 MiB per image, 100 MiB total. "
+                "ZIP: 50 MiB compressed. Images must be JPG/PNG satellite patches."
+            )
+            batch_submitted = st.form_submit_button(
+                "🚀 Classify Batch", type="primary", use_container_width=True,
+            )
+
+        if batch_submitted:
+            progress_bar = st.progress(0.0)
+            progress_text = st.empty()
+
+            def update_progress(done: int, total: int) -> None:
+                progress_bar.progress(min(1.0, done / total))
+                progress_text.caption(f"Processed {done:,} / {total:,} files")
+
+            try:
+                with st.spinner("Classifying uploaded satellite images on CPU..."):
+                    batch_rows = classify_rgb_batch(
+                        batch_uploads, selected_model, batch_size=batch_size,
+                        zip_upload=zip_upload, on_progress=update_progress,
+                    )
+                st.session_state["last_rgb_batch_report"] = {
+                    "rows": batch_rows,
+                    "model": selected_model,
+                }
+                st.success("Batch classification finished.")
+            except (ValueError, OSError, RuntimeError, FileNotFoundError) as exc:
+                st.session_state.pop("last_rgb_batch_report", None)
+                st.error(f"Batch classification could not start: {exc}")
+            finally:
+                progress_bar.empty()
+                progress_text.empty()
+
+        saved_report = st.session_state.get("last_rgb_batch_report")
+        if saved_report:
+            rows = saved_report["rows"]
+            summary = summarize_results(rows, list(manifest["classes"]))
+            st.markdown(f"#### Results — {saved_report['model']}")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Uploaded", summary["total"])
+            col2.metric("Successful", summary["successful"])
+            col3.metric("Failed", summary["failed"])
+            col4.metric(
+                "Mean Top-1 score (uncalibrated)",
+                f"{summary['mean_top1_score']:.1%}" if summary["mean_top1_score"] is not None else "—",
+            )
+            left_analytics, right_analytics = st.columns([3, 2], gap="large")
+            with left_analytics:
+                st.markdown("#### Predicted class distribution")
+                distribution = pd.DataFrame(summary["distribution"])
+                st.bar_chart(distribution.set_index("class")["count"])
+                st.caption(
+                    "Counts and percentages refer to successfully classified images, "
+                    "not real-world geographic area coverage."
+                )
+            with right_analytics:
+                st.markdown("#### Class summary")
+                st.dataframe(
+                    pd.DataFrame(summary["distribution"]),
+                    use_container_width=True, hide_index=True,
+                )
+            st.markdown("#### Detailed image results")
+            choice = st.selectbox("Filter by status", ["All", "success", "error"], key="batch_status_filter")
+            classes_filter = st.multiselect(
+                "Filter by predicted class (leave empty for all)",
+                options=list(manifest["classes"]), key="batch_class_filter",
+            )
+            filtered = [
+                row for row in rows
+                if (choice == "All" or row["status"] == choice)
+                and (not classes_filter or row["predicted_class"] in classes_filter)
+            ]
+            st.dataframe(pd.DataFrame(filtered), use_container_width=True, hide_index=True)
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button(
+                    "⬇️ Download detailed CSV", data=results_to_csv(rows),
+                    file_name="batch_classification_results.csv", mime="text/csv",
+                    use_container_width=True, key="download_batch_details",
+                )
+            with dl2:
+                st.download_button(
+                    "⬇️ Download class summary CSV", data=summary_to_csv(summary),
+                    file_name="batch_class_distribution.csv", mime="text/csv",
+                    use_container_width=True, key="download_batch_summary",
+                )
+            st.caption(
+                "Reports include unsuccessful files. Predictions may be unreliable "
+                "for non-EuroSAT images; review them before operational use."
+            )
+        else:
+            st.info("Choose a model, upload multiple images or a ZIP, and click **Classify Batch**.")
 
     with tab_ms:
         st.subheader("Classify a 13-band Sentinel-2 GeoTIFF")
