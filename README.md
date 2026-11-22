@@ -362,6 +362,49 @@ Additional qualifications:
 | Streamlit Cloud out-of-memory | The app caches at most one loaded model, but free resources vary; review Cloud logs and resource limits. |
 | App does not run after deploy | Confirm entrypoint `Web_App/app.py`, Python 3.11, LFS files, and requirements in `Web_App/`. |
 
+
+## Smart Review & Multi-Model Comparison
+
+The RGB batch workflow also supports **Multi-Model Comparison**. It runs the existing
+ResNet50 RGB and EfficientNet-B0 RGB checkpoints on the same uploaded images, then
+compares each pair of predictions by filename. This is an inference-only feature:
+no retraining, fine-tuning, or checkpoint replacement is required.
+
+### What it adds
+
+- Run both trained RGB models against the same batch of JPG/PNG files or one ZIP archive.
+- Load the models sequentially (one model at a time) to reduce peak memory use.
+- Compare Top-1 predictions for every image and report agreement, disagreement,
+  partial model failure, or total failure.
+- Always place disagreements and model failures in the human-review queue.
+- Optionally flag low Top-1 scores and small Top-1-vs-Top-2 margins using separate
+  per-model thresholds. These optional rules are disabled unless selected.
+- Filter comparison results and export all comparisons or only the review queue.
+
+### Interpretation and limitations
+
+- **Agreement is not proof of correctness.** Both models can make the same wrong prediction.
+- The agreement rate is a consistency measure among images successfully processed
+  by both models; it is not model accuracy.
+- Softmax scores are uncalibrated. Optional score and margin thresholds are
+  review heuristics, not calibrated confidence estimates, and scores are not
+  compared directly across the two model architectures.
+- Multi-model comparison currently supports RGB inputs only. The existing
+  single-image 13-band multispectral workflow remains unchanged.
+- A model failure is retained as a partial/failed comparison row and flagged for review.
+- The comparison workflow does not modify checkpoints or train a new model.
+
+### Run tests
+
+```bash
+python -m unittest discover -s Web_App/tests -v
+python Web_App/verify_package.py
+```
+
+See [`SMART_REVIEW_VERIFICATION.md`](SMART_REVIEW_VERIFICATION.md) for the implementation
+scope, test results, and verification limitations.
+
+
 ## References and acknowledgements
 
 - Helber, P. et al., **EuroSAT: A Novel Dataset and Deep Learning Benchmark for Land Use and Land Cover Classification** — [paper](https://arxiv.org/abs/1709.00029), [dataset repository](https://github.com/phelber/EuroSAT).
